@@ -15,7 +15,6 @@ macro_rules! deprecated_crate_feature {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
-    deprecated_crate_feature!("msrv");
     deprecated_crate_feature!("rustversion");
     deprecated_crate_feature!("xxx_debug_only_print_generated_code");
 
