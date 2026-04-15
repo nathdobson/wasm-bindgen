@@ -195,7 +195,7 @@ extern "C" {
     pub fn get_availability(this: &Bluetooth) -> ::js_sys::Promise<::js_sys::Boolean>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "BluetoothDevice")]
-    # [wasm_bindgen (method , structural , js_class = "Bluetooth" , js_name = getDevices)]
+    # [wasm_bindgen (method , structural , js_class = "Bluetooth" , js_name = getDevices, catch)]
     #[doc = "The `getDevices()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Bluetooth/getDevices)"]
@@ -204,7 +204,7 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
     #[doc = "[described in the `wasm-bindgen` guide](https://wasm-bindgen.github.io/wasm-bindgen/web-sys/unstable-apis.html)*"]
-    pub fn get_devices(this: &Bluetooth) -> ::js_sys::Promise<::js_sys::Array<BluetoothDevice>>;
+    pub fn get_devices(this: &Bluetooth) -> Result<::js_sys::Promise<::js_sys::Array<BluetoothDevice>>, JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "BluetoothDevice", feature = "RequestDeviceOptions",))]
     # [wasm_bindgen (method , structural , js_class = "Bluetooth" , js_name = requestDevice)]
