@@ -7,7 +7,7 @@ export function add_that_might_fail(a, b) {
     const ret = wasm.add_that_might_fail(a, b);
     return ret >>> 0;
 }
-export function __wbg___wbindgen_throw_6b64449b9b9ed33c(arg0, arg1) {
+export function __wbg___wbindgen_throw_9c75d47bf9e7731e(arg0, arg1) {
     throw new Error(getStringFromWasm0(arg0, arg1));
 }
 export function __wbg_random_6e647071acda68e7() {
@@ -26,8 +26,7 @@ export function __wbindgen_init_externref_table() {
 
 export const memory = new WebAssembly.Memory({initial:18,maximum:16384,shared:true});
 function getStringFromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return decodeText(ptr, len);
+    return decodeText(ptr >>> 0, len);
 }
 
 let cachedUint8ArrayMemory0 = null;

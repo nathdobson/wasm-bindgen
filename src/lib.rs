@@ -46,6 +46,10 @@
     feature(allow_internal_unstable),
     allow(internal_features)
 )]
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "std"), target_arch = "wasm64"),
+    feature(simd_wasm64)
+)]
 #![doc(html_root_url = "https://docs.rs/wasm-bindgen/0.2")]
 
 extern crate alloc;
@@ -136,7 +140,7 @@ mod externref;
 use externref::__wbindgen_externref_heap_live_count;
 
 pub use crate::__rt::marker::ErasableGeneric;
-pub use crate::convert::JsGeneric;
+pub use crate::convert::{IntoJsGeneric, JsGeneric};
 
 #[doc(hidden)]
 pub mod handler;
@@ -1139,34 +1143,33 @@ impl<T: TryFromJsValue> TryFromJsValue for Option<T> {
     }
 }
 
-// `usize` and `isize` have to be treated a bit specially, because we know that
-// they're 32-bit but the compiler conservatively assumes they might be bigger.
-// So, we have to manually forward to the `u32`/`i32` versions.
+// `usize` and `isize` use the public pointer-sized JS number ABI, which is
+// `u32`/`i32` on wasm32 and `f64` on wasm64.
 impl PartialEq<usize> for JsValue {
     #[inline]
     fn eq(&self, other: &usize) -> bool {
-        *self == (*other as u32)
+        *self == (*other as crate::__rt::WasmWordRepr)
     }
 }
 
 impl From<usize> for JsValue {
     #[inline]
     fn from(n: usize) -> Self {
-        Self::from(n as u32)
+        Self::from(n as crate::__rt::WasmWordRepr)
     }
 }
 
 impl PartialEq<isize> for JsValue {
     #[inline]
     fn eq(&self, other: &isize) -> bool {
-        *self == (*other as i32)
+        *self == (*other as crate::__rt::WasmSignedWordRepr)
     }
 }
 
 impl From<isize> for JsValue {
     #[inline]
     fn from(n: isize) -> Self {
-        Self::from(n as i32)
+        Self::from(n as crate::__rt::WasmSignedWordRepr)
     }
 }
 
@@ -1272,6 +1275,7 @@ extern "C" {
     fn __wbindgen_exports() -> JsValue;
     fn __wbindgen_memory() -> JsValue;
     fn __wbindgen_module() -> JsValue;
+    fn __wbindgen_instance() -> JsValue;
     fn __wbindgen_function_table() -> JsValue;
 
     fn __wbindgen_reinit();
@@ -1669,6 +1673,15 @@ pub fn module() -> JsValue {
     __wbindgen_module()
 }
 
+/// Returns a handle to this Wasm instance's `WebAssembly.Instance`.
+/// This is only available when the final Wasm app is built with
+/// `--target no-modules`, `--target web`, `--target deno` or `--target nodejs`.
+/// It is unavailable for `--target bundler`.
+pub fn instance() -> JsValue {
+    __wbindgen_instance()
+}
+
+// TODO: deprecate next major
 /// Returns a handle to this Wasm instance's `WebAssembly.Instance.prototype.exports`
 pub fn exports() -> JsValue {
     __wbindgen_exports()
@@ -1771,6 +1784,7 @@ impl<T> DerefMut for Clamped<T> {
 ///
 /// ```
 #[derive(Clone, Debug)]
+#[repr(transparent)]
 pub struct JsError {
     value: JsValue,
 }

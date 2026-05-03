@@ -84,28 +84,71 @@ fn from_iter() {
 }
 
 // Regression test for https://github.com/wasm-bindgen/wasm-bindgen/issues/5042:
-// collecting a wasm_bindgen type without explicit type annotations must not cause E0283.
-#[cfg(not(js_sys_unstable_apis))]
+// collecting a `#[wasm_bindgen]` type without explicit type annotations must
+// not cause E0283. The stable `FromIterator` impl on `Array` (= `Array<JsValue>`)
+// is bound by `AsRef<JsValue>`, which `JsString` satisfies, so the result is
+// the erased `Array<JsValue>`. To preserve the element type, use
+// `Array::<T>::from_iter_typed`, which is typed via `IntoJsGeneric`.
 #[wasm_bindgen_test]
 fn from_iter_wasm_bindgen_type() {
-    // JsString implements AsRef<JsValue> and AsRef<JsString>; before the fix this
-    // caused "cannot infer type for type parameter T" on the stable FromIterator impl.
+    // Stable form: erased `Array<JsValue>`, no turbofish needed.
     let arr = Array::from_iter([JsString::from("a"), JsString::from("b")]);
     assert_eq!(arr.length(), 2);
 
-    let arr = [JsString::from("x"), JsString::from("y")]
-        .iter()
-        .collect::<Array>();
+    // Typed form: inference picks `Array<JsString>` via `IntoJsGeneric`.
+    let arr: Array<JsString> = Array::from_iter_typed([JsString::from("x"), JsString::from("y")]);
+    assert_eq!(arr.length(), 2);
+
+    // Reference iteration: `Item = &JsString`, the `&T: IntoJsGeneric`
+    // blanket delegates through to `JsString::JsCanon = JsString`.
+    let arr: Array<JsString> =
+        Array::from_iter_typed([JsString::from("p"), JsString::from("q")].iter());
     assert_eq!(arr.length(), 2);
 }
 
-#[cfg(not(js_sys_unstable_apis))]
+// Regression shape from the flutter_rust_bridge report (fzyzcjy/flutter_rust_bridge#3009):
+//
+//     worker.post_message(&Array::from_iter([wasm_init_object]))?;
+//
+// The important property is that `Array::from_iter([owned_value])` — where
+// the iterator item is an owned `#[wasm_bindgen]` type — must compile
+// without any turbofish or type annotation. The stable `FromIterator` returns
+// erased `Array<JsValue>`; `Array::<T>::from_iter_typed` infers the typed
+// `Array<T>` for callers who want it.
+#[wasm_bindgen_test]
+fn from_iter_owned_wasm_bindgen_type_infers() {
+    fn take_object_array(arr: &Array<Object>) {
+        assert_eq!(arr.length(), 1);
+    }
+    fn take_value_array(arr: &Array) {
+        assert_eq!(arr.length(), 1);
+    }
+
+    // Stable: erased `Array<JsValue>` (= `Array`).
+    let obj = Object::new();
+    let arr = Array::from_iter([obj]);
+    take_value_array(&arr);
+
+    // Typed: `Array<Object>` via `IntoJsGeneric` inference.
+    let obj = Object::new();
+    let arr = Array::from_iter_typed([obj]);
+    take_object_array(&arr);
+}
+
 #[wasm_bindgen_test]
 fn extend() {
+    // Stable `Extend` on `Array` (= `Array<JsValue>`) is bound by
+    // `AsRef<JsValue>`, so typed items extend an erased array directly.
     let mut array = Array::new();
     array.extend([JsString::from("a"), JsString::from("b")]);
     array.extend([JsString::from("c"), JsString::from("d")]);
     assert_eq!(array.length(), 4);
+
+    // Typed companion: `extend_typed` on `Array<T>` projects items through
+    // `IntoJsGeneric` and preserves the element type.
+    let mut array: Array<JsString> = Array::new_typed();
+    array.extend_typed([JsString::from("e"), JsString::from("f")]);
+    assert_eq!(array.length(), 2);
 }
 
 #[wasm_bindgen_test]
@@ -1362,25 +1405,23 @@ fn test_array_to_vec() {
     assert_eq!(second.id(), 2);
 }
 
-#[cfg(js_sys_unstable_apis)]
 #[wasm_bindgen_test]
-fn test_array_from_iter() {
+fn test_array_from_iter_typed() {
     let items = vec![
         TestItem::new(1, &JsString::from("a")),
         TestItem::new(2, &JsString::from("b")),
         TestItem::new(3, &JsString::from("c")),
     ];
 
-    let arr: Array<TestItem> = items.iter().map(|i| i).collect();
+    let arr: Array<TestItem> = Array::from_iter_typed(items.iter());
 
     assert_eq!(arr.length(), 3);
     let first: TestItem = unwrap_get!(arr, 0);
     assert_eq!(first.id(), 1);
 }
 
-#[cfg(js_sys_unstable_apis)]
 #[wasm_bindgen_test]
-fn test_array_extend() {
+fn test_array_extend_typed() {
     let mut arr: Array<TestItem> = Array::new_typed();
     arr.push(&TestItem::new(1, &JsString::from("a")));
 
@@ -1388,7 +1429,7 @@ fn test_array_extend() {
         TestItem::new(2, &JsString::from("b")),
         TestItem::new(3, &JsString::from("c")),
     ];
-    arr.extend(more);
+    arr.extend_typed(more);
 
     assert_eq!(arr.length(), 3);
 }

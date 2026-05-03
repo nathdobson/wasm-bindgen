@@ -3,6 +3,82 @@
 
 ## Unreleased
 
+### Added
+
+### Fixed
+
+* Fix compilation failure with `no_std` + `release`
+  [#5134](https://github.com/wasm-bindgen/wasm-bindgen/pull/5134)
+
+### Changed
+
+--------------------------------------------------------------------------------
+
+## [0.2.119](https://github.com/rustwasm/wasm-bindgen/compare/0.2.118...0.2.119)
+
+### Added
+
+* Added support for the `wasm64-unknown-unknown` target (memory64 / wasm64).
+  `usize` / `isize` and raw pointers are now lowered through an `f64` JS
+  number ABI on wasm64 (matching the existing convention used for `Option<u32>`
+  etc. on wasm32), with the CLI inspecting the module's memory type to pick
+  the right codegen path. Includes a dedicated `wasm64` CI job and test
+  suite covering the new ABI paths.
+  [#5004](https://github.com/wasm-bindgen/wasm-bindgen/pull/5004)
+
+* Promise ergonomics: `Promise::all_tuple` and `Promise::all_settled_tuple`
+  for heterogeneous concurrent awaits (arity 1..=8, destructure via
+  `.into_tuple()`), and a new `wasm_bindgen::IntoJsGeneric` trait underpinning
+  typed-`Array` inference (with codegen-emitted identity impls and a
+  `#[wasm_bindgen(no_into_js_generic)]` opt-out for types like `JsClosure`).
+  Also re-exports `JsGeneric` from the prelude. Typed collection on
+  `js_sys::Array<T>` is exposed as the inherent constructor
+  `Array::<T>::from_iter_typed` (and companion `extend_typed`), inferring `T`
+  from the iterator item via `IntoJsGeneric`. The stable `FromIterator` /
+  `Extend` impls on `Array` (= `Array<JsValue>`) bound by `AsRef<JsValue>`
+  are preserved, so existing `.collect::<Array>()` call sites keep compiling
+  unchanged. Fixes [#5042](https://github.com/wasm-bindgen/wasm-bindgen/issues/5042).
+  [#5121](https://github.com/wasm-bindgen/wasm-bindgen/pull/5121),
+  [#5125](https://github.com/wasm-bindgen/wasm-bindgen/pull/5125)
+
+* Added `wasm_bindgen::instance()` to return the current
+  `WebAssembly.Instance`. The generated JS glue retains the 
+  instantiated `WebAssembly.Instance`.
+  [#5118](https://github.com/wasm-bindgen/wasm-bindgen/pull/5118)
+
+* Added a `--cfg=wasm_bindgen_use_js_sys` opt-in that makes async macro codegen
+  use `js_sys::futures` instead of `wasm_bindgen_futures`, dropping the need
+  for `wasm-bindgen-futures` when the crate already depends on `js-sys`. A cfg
+  is used rather than a Cargo feature so the choice stays scoped to the crate
+  that opts in.
+  [#5112](https://github.com/wasm-bindgen/wasm-bindgen/pull/5112)
+  [#5127](https://github.com/wasm-bindgen/wasm-bindgen/pull/5127)
+
+### Changed
+
+* Simplified generated `web-sys` bindings by omitting redundant
+  `#[wasm_bindgen]` attributes when they match wasm-bindgen defaults, including
+  structural method annotations and matching `js_name` entries. The
+  `#[wasm_bindgen]` attribute parser now also accepts string-literal forms for
+  `extends`, `static_method_of`, and `vendor_prefix` (alongside the existing
+  bare-path/ident syntax), and the generator emits these arguments along with
+  `js_name` as string literals so `rustfmt` can format the generated
+  `#[wasm_bindgen(...)]` attributes uniformly.
+  [#5122](https://github.com/wasm-bindgen/wasm-bindgen/pull/5122)
+
+### Fixed
+
+* Fixed namespaced export identifiers in generated JS/TS to use qualified names
+  consistently, resolving order-dependent codegen issues across platforms. Also
+  fixed `Vec<T>` types in TS signatures to resolve through the identifier map.
+  [#5106](https://github.com/wasm-bindgen/wasm-bindgen/pull/5106)
+
+* Fixed `wasm-bindgen-test-runner` treating ChromeDriver stderr warnings as
+  startup failures on macOS, causing a restart loop until timeout. The runner
+  no longer uses stderr output to determine if a driver has failed; instead a
+  per-attempt timeout detects stuck drivers and retries on a new port.
+  [#5111](https://github.com/wasm-bindgen/wasm-bindgen/pull/5111)
+
 ## [0.2.118](https://github.com/rustwasm/wasm-bindgen/compare/0.2.117...0.2.118)
 
 ### Added

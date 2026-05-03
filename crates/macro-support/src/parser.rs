@@ -99,6 +99,7 @@ macro_rules! attrgen {
             (no_deref, false, NoDeref(Span)),
             (no_upcast, false, NoUpcast(Span)),
             (no_promising, false, NoPromising(Span)),
+            (no_into_js_generic, false, NoIntoJsGeneric(Span)),
             (vendor_prefix, false, VendorPrefix(Span, Ident)),
             (variadic, false, Variadic(Span)),
             (typescript_custom_section, false, TypescriptCustomSection(Span)),
@@ -345,7 +346,17 @@ impl Parse for BindgenAttr {
 
             (@parser $variant:ident(Span, Ident)) => ({
                 input.parse::<Token![=]>()?;
-                let ident = input.parse::<AnyIdent>()?.0;
+                // Accept either a bare ident or a string literal containing one.
+                // The string-literal form lets `rustfmt` format the surrounding
+                // attribute, since rustfmt only handles `name = <literal>` arms.
+                let ident = if input.peek(syn::LitStr) {
+                    let litstr = input.parse::<syn::LitStr>()?;
+                    syn::parse_str::<Ident>(&litstr.value()).map_err(|e| {
+                        syn::Error::new(litstr.span(), format!("expected an identifier: {e}"))
+                    })?
+                } else {
+                    input.parse::<AnyIdent>()?.0
+                };
                 return Ok(BindgenAttr::$variant(attr_span, ident))
             });
 
@@ -365,7 +376,18 @@ impl Parse for BindgenAttr {
 
             (@parser $variant:ident(Span, syn::Path)) => ({
                 input.parse::<Token![=]>()?;
-                return Ok(BindgenAttr::$variant(attr_span, input.parse()?));
+                // Accept either a bare path or a string literal containing one.
+                // The string-literal form lets `rustfmt` format the surrounding
+                // attribute, since rustfmt only handles `name = <literal>` arms.
+                let path = if input.peek(syn::LitStr) {
+                    let litstr = input.parse::<syn::LitStr>()?;
+                    syn::parse_str::<syn::Path>(&litstr.value()).map_err(|e| {
+                        syn::Error::new(litstr.span(), format!("expected a path: {e}"))
+                    })?
+                } else {
+                    input.parse()?
+                };
+                return Ok(BindgenAttr::$variant(attr_span, path));
             });
 
             (@parser $variant:ident(Span, syn::Expr)) => ({
@@ -797,6 +819,7 @@ impl<'a> ConvertToAst<(&ast::Program, BindgenAttrs, &'a Option<ast::ImportModule
             doc_comment,
             wasm_bindgen: program.wasm_bindgen.clone(),
             wasm_bindgen_futures: program.wasm_bindgen_futures.clone(),
+            js_sys: program.js_sys.clone(),
             generics: self.sig.generics,
         });
         opts.check_used();
@@ -828,6 +851,7 @@ impl ConvertToAst<(&ast::Program, BindgenAttrs)> for syn::ForeignItemType {
         let no_deref = attrs.no_deref().is_some();
         let no_upcast = attrs.no_upcast().is_some();
         let no_promising = attrs.no_promising().is_some();
+        let no_into_js_generic = attrs.no_into_js_generic().is_some();
         for (used, attr) in attrs.attrs.iter() {
             match attr {
                 BindgenAttr::Extends(_, e) => {
@@ -870,6 +894,7 @@ impl ConvertToAst<(&ast::Program, BindgenAttrs)> for syn::ForeignItemType {
             no_deref,
             no_upcast,
             no_promising,
+            no_into_js_generic,
             wasm_bindgen: program.wasm_bindgen.clone(),
             generics: generics.unwrap_or(self.generics),
         }))
@@ -1437,6 +1462,7 @@ impl<'a> MacroParse<(Option<BindgenAttrs>, &'a mut TokenStream)> for syn::Item {
                     start,
                     wasm_bindgen: program.wasm_bindgen.clone(),
                     wasm_bindgen_futures: program.wasm_bindgen_futures.clone(),
+                    js_sys: program.js_sys.clone(),
                 });
             }
             syn::Item::Impl(mut i) => {
@@ -1569,13 +1595,14 @@ fn prepare_for_impl_recursion(
 
     let wasm_bindgen = &program.wasm_bindgen;
     let wasm_bindgen_futures = &program.wasm_bindgen_futures;
+    let js_sys = &program.js_sys;
     method.attrs.insert(
         0,
         syn::Attribute {
             pound_token: Default::default(),
             style: syn::AttrStyle::Outer,
             bracket_token: Default::default(),
-            meta: syn::parse_quote! { #wasm_bindgen::prelude::__wasm_bindgen_class_marker(#class = #js_class, wasm_bindgen = #wasm_bindgen, wasm_bindgen_futures = #wasm_bindgen_futures) },
+            meta: syn::parse_quote! { #wasm_bindgen::prelude::__wasm_bindgen_class_marker(#class = #js_class, wasm_bindgen = #wasm_bindgen, wasm_bindgen_futures = #wasm_bindgen_futures, js_sys = #js_sys) },
         },
     );
 
@@ -1591,10 +1618,12 @@ impl MacroParse<&ClassMarker> for &mut syn::ImplItemFn {
             js_class,
             wasm_bindgen,
             wasm_bindgen_futures,
+            js_sys,
         }: &ClassMarker,
     ) -> Result<(), Diagnostic> {
         program.wasm_bindgen = wasm_bindgen.clone();
         program.wasm_bindgen_futures = wasm_bindgen_futures.clone();
+        program.js_sys = js_sys.clone();
 
         match self.vis {
             syn::Visibility::Public(_) => {}
@@ -1660,6 +1689,7 @@ impl MacroParse<&ClassMarker> for &mut syn::ImplItemFn {
             start: ast::StartKind::None,
             wasm_bindgen: program.wasm_bindgen.clone(),
             wasm_bindgen_futures: program.wasm_bindgen_futures.clone(),
+            js_sys: program.js_sys.clone(),
         });
         opts.check_used();
         Ok(())
@@ -2439,12 +2469,18 @@ fn main(program: &ast::Program, mut f: ItemFn, tokens: &mut TokenStream) -> Resu
 
     let wasm_bindgen = &program.wasm_bindgen;
     let wasm_bindgen_futures = &program.wasm_bindgen_futures;
+    let js_sys = &program.js_sys;
+    let futures = if ast::use_js_sys_futures() {
+        quote::quote! { #js_sys::futures }
+    } else {
+        quote::quote! { #wasm_bindgen_futures }
+    };
 
     if f.sig.asyncness.take().is_some() {
         *f.block = syn::parse2(quote::quote! {
                 {
                     async fn __wasm_bindgen_generated_main() #r#return #body
-                    #wasm_bindgen_futures::spawn_local(
+                    #futures::spawn_local(
                         async move {
                             use #wasm_bindgen::__rt::Main;
                             let __ret = __wasm_bindgen_generated_main();

@@ -21,14 +21,14 @@ class _default {
      */
     constructor(value) {
         const ret = wasm.default_new(value);
-        this.__wbg_ptr = ret >>> 0;
+        this.__wbg_ptr = ret;
         _defaultFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
 }
 if (Symbol.dispose) _default.prototype[Symbol.dispose] = _default.prototype.free;
 export { _default as default }
-export function __wbg___wbindgen_throw_6b64449b9b9ed33c(arg0, arg1) {
+export function __wbg___wbindgen_throw_9c75d47bf9e7731e(arg0, arg1) {
     throw new Error(getStringFromWasm0(arg0, arg1));
 }
 export function __wbindgen_init_externref_table() {
@@ -42,11 +42,10 @@ export function __wbindgen_init_externref_table() {
 }
 const _defaultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_default_free(ptr >>> 0, 1));
+    : new FinalizationRegistry(ptr => wasm.__wbg_default_free(ptr, 1));
 
 function getStringFromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return decodeText(ptr, len);
+    return decodeText(ptr >>> 0, len);
 }
 
 let cachedUint8ArrayMemory0 = null;

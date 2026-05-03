@@ -1,7 +1,7 @@
 export function exported() {
     wasm.exported();
 }
-export function __wbg___wbindgen_throw_6b64449b9b9ed33c(arg0, arg1) {
+export function __wbg___wbindgen_throw_9c75d47bf9e7731e(arg0, arg1) {
     throw new Error(getStringFromWasm0(arg0, arg1));
 }
 export function __wbg_parseFloat_8d725959a008cb49(arg0) {
@@ -27,8 +27,7 @@ export function __wbindgen_init_externref_table() {
     table.set(offset + 3, false);
 }
 function getStringFromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return decodeText(ptr, len);
+    return decodeText(ptr >>> 0, len);
 }
 
 let cachedUint8ArrayMemory0 = null;

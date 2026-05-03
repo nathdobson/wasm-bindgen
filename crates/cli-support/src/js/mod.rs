@@ -120,8 +120,8 @@ pub struct Context<'a> {
     /// Mapping from qualified name (used in WasmDescribe) to rust_name (used as exported_classes key).
     pub(crate) qualified_to_rust_name: HashMap<String, String>,
 
-    /// Mapping from qualified name (used in WasmDescribe) to js_name (used for TypeScript output).
-    pub(crate) qualified_to_js_name: HashMap<String, String>,
+    /// Mapping from qualified name (used in WasmDescribe) to the unique declaration identifier.
+    pub(crate) qualified_to_identifier: HashMap<String, String>,
     /// Tracks dependencies (Emscripten imports) for the current adapter being generated.
     /// Must be cleared at the start of `generate_adapter`.
     adapter_deps: BTreeSet<String>,
@@ -132,6 +132,9 @@ pub struct Context<'a> {
     /// Tracks the specific Emscripten dependencies for each individual Wasm import.
     /// These are gathered from `adapter_deps` during adapter generation.
     emscripten_import_deps: BTreeMap<ImportId, BTreeSet<String>>,
+
+    /// `true` when the module's memory is a memory64 (wasm64) memory.
+    memory64: bool,
 }
 
 /// Definition of a module export
@@ -146,7 +149,6 @@ struct ExportDefinition {
     /// The identifier for the declaration, if distinct from the export name
     /// This allows invalid identifier export names (like "default").
     identifier: String,
-
     comments: Option<String>,
     definition: String,
 
@@ -226,6 +228,7 @@ impl<'a> Context<'a> {
         wit: &'a NonstandardWitSection,
         aux: &'a WasmBindgenAux,
     ) -> Result<Context<'a>, Error> {
+        let memory64 = module.memories.iter().next().is_some_and(|m| m.memory64);
         Ok(Context {
             globals: String::new(),
             es_module_imports: String::new(),
@@ -254,16 +257,37 @@ impl<'a> Context<'a> {
             table_indices: Default::default(),
             stack_pointer_shim_injected: false,
             qualified_to_rust_name: Default::default(),
-            qualified_to_js_name: Default::default(),
+            qualified_to_identifier: Default::default(),
             emscripten_library: String::new(),
             adapter_deps: Default::default(),
             emscripten_global_deps: Default::default(),
             emscripten_import_deps: Default::default(),
+            memory64,
         })
     }
 
     fn has_intrinsic(&self, name: &str) -> bool {
         self.intrinsics.as_ref().unwrap().contains_key(name)
+    }
+
+    /// Suffix ` >>> 0` on wasm32, empty on wasm64. Append to a pointer-sized
+    /// expression about to be used as a typed-array / DataView index.
+    fn coerce_ptr_suffix(&self) -> &'static str {
+        if self.memory64 {
+            ""
+        } else {
+            " >>> 0"
+        }
+    }
+
+    /// Statement form of [`Self::coerce_ptr_suffix`]: normalizes `name` in
+    /// place on wasm32, expands to nothing on wasm64.
+    fn coerce_ptr_assign(&self, name: &str) -> String {
+        if self.memory64 {
+            String::new()
+        } else {
+            format!("{name} = {name} >>> 0;")
+        }
     }
 
     /// A helper function to add any necessary addToLibrary wrappings for Emscripten
@@ -1015,7 +1039,7 @@ export const __wbg_memory: WebAssembly.Memory;
             "import source wasmModule from \"./{module_name}_bg.wasm\";\n"
         ));
         format!(
-            "const wasmInstance = new WebAssembly.Instance(wasmModule, __wbg_get_imports());\n\
+            "let wasmInstance = new WebAssembly.Instance(wasmModule, __wbg_get_imports());\n\
              let wasm = wasmInstance.exports;\n\
              {start}",
             start = if needs_manual_start {
@@ -1103,8 +1127,9 @@ export const __wbg_memory: WebAssembly.Memory;
             }
         }
         format!(
-            "let wasmModule, wasm;
+            "let wasmModule, wasmInstance, wasm;
             function __wbg_finalize_init(instance, module{init_stack_size_arg}) {{
+                wasmInstance = instance;
                 wasm = instance.exports;
                 wasmModule = module;
                 {init_memviews}{init_stack_size_check}{start}return wasm;
@@ -1239,7 +1264,8 @@ export const __wbg_memory: WebAssembly.Memory;
         format!(
             "const wasmUrl = new URL('{module_name}_bg.wasm', import.meta.url);
             const wasmInstantiated = await WebAssembly.instantiateStreaming(fetch(wasmUrl), __wbg_get_imports());
-            const wasm = wasmInstantiated.instance.exports;
+            const wasmInstance = wasmInstantiated.instance;
+            const wasm = wasmInstance.exports;
             {start}",
             start = if needs_manual_start {
                 "wasm.__wbindgen_start();\n"
@@ -1276,9 +1302,7 @@ export const __wbg_memory: WebAssembly.Memory;
             };
 
             format!(
-                r#"let wasm;
-let wasmModule;
-let memory;
+                r#"let wasm, wasmInstance, wasmModule, memory;
 let __initialized = false;
 
 export function initSync(opts = {{}}) {{
@@ -1298,8 +1322,8 @@ export function initSync(opts = {{}}) {{
     }}
 
     const wasmImports = __wbg_get_imports(mem);
-    const instance = new WebAssembly.Instance(wasmModule, wasmImports);
-    wasm = instance.exports;
+    wasmInstance = new WebAssembly.Instance(wasmModule, wasmImports);
+    wasm = wasmInstance.exports;
     memory = wasmImports['./{module_name}_bg.js'].memory;
 {start_call}
     __initialized = true;
@@ -1321,7 +1345,8 @@ export {{ wasm as __wasm, wasmModule as __wbg_wasm_module, memory as __wbg_memor
                 const wasmUrl = new URL('{module_name}_bg.wasm', import.meta.url);\n\
                 const wasmBytes = readFileSync(wasmUrl);\n\
                 const wasmModule = new WebAssembly.Module(wasmBytes);\n\
-                let wasm = new WebAssembly.Instance(wasmModule, __wbg_get_imports()).exports;\n\
+                let wasmInstance = new WebAssembly.Instance(wasmModule, __wbg_get_imports());\n\
+                let wasm = wasmInstance.exports;\n\
                 {start}",
                 start = if needs_manual_start {
                     "wasm.__wbindgen_start();\n"
@@ -1354,9 +1379,7 @@ export {{ wasm as __wasm, wasmModule as __wbg_wasm_module, memory as __wbg_memor
             };
 
             format!(
-                r#"let wasm;
-let wasmModule;
-let memory;
+                r#"let wasm, wasmInstance, wasmModule, memory;
 let __initialized = false;
 
 // Export __wbg_get_imports for workers to use
@@ -1382,8 +1405,8 @@ exports.initSync = function(opts) {{
     }}
 
     const wasmImports = __wbg_get_imports(mem);
-    const instance = new WebAssembly.Instance(wasmModule, wasmImports);
-    wasm = instance.exports;
+    wasmInstance = new WebAssembly.Instance(wasmModule, wasmImports);
+    wasm = wasmInstance.exports;
     memory = wasmImports['./{module_name}_bg.js'].memory;
     exports.__wasm = wasm;
     exports.__wbg_wasm_module = wasmModule;
@@ -1405,7 +1428,8 @@ if (require('worker_threads').isMainThread) {{
                 r#"const wasmPath = `${{__dirname}}/{module_name}_bg.wasm`;
             const wasmBytes = require('fs').readFileSync(wasmPath);
             const wasmModule = new WebAssembly.Module(wasmBytes);
-            let wasm = new WebAssembly.Instance(wasmModule, __wbg_get_imports()).exports;
+            let wasmInstance = new WebAssembly.Instance(wasmModule, __wbg_get_imports());
+            let wasm = wasmInstance.exports;
             {start}"#,
                 start = if needs_manual_start {
                     "wasm.__wbindgen_start();\n"
@@ -1449,7 +1473,7 @@ if (require('worker_threads').isMainThread) {{
                     {classes_and_exports}
                 }}
             }});
-            
+
             extraLibraryFuncs.push('$initBindgen', '$addOnInit', '$wasm', {formatted_deps});
             "#,
             formatted_deps = formatted_deps.join(", ")
@@ -1533,17 +1557,14 @@ if (require('worker_threads').isMainThread) {{
             .get(&key)
             .is_none_or(|cls| cls.identifier.is_empty())
         {
-            // Use js_name for the identifier if available, otherwise use the key
-            let js_name = self
+            let identifier_name = self
                 .exported_classes
                 .get(&key)
-                .and_then(|cls| cls.js_name.clone())
+                .and_then(|cls| cls.qualified_name.clone().or_else(|| cls.js_name.clone()))
                 .unwrap_or_else(|| key.clone());
-            let identifier = self.generate_identifier(&js_name);
-            self.exported_classes
-                .entry(key.clone())
-                .or_default()
-                .identifier = identifier;
+            let identifier = self.generate_identifier(&identifier_name);
+            let class = self.exported_classes.entry(key.clone()).or_default();
+            class.identifier = identifier.clone();
         }
         self.exported_classes.get_mut(&key).unwrap()
     }
@@ -1596,7 +1617,6 @@ if (require('worker_threads').isMainThread) {{
             dst.push_str(&format!(
                 "\
                 static __wrap(ptr) {{
-                    ptr = ptr >>> 0;
                     const obj = Object.create({identifier}.prototype);
                     {ptr_assignment}
                     {identifier}Finalization.register(obj, {register_data}, obj);
@@ -1622,13 +1642,13 @@ if (require('worker_threads').isMainThread) {{
         let finalization_callback = if self.generate_reinit {
             format!(
                 "({{ ptr, instance }}) => {{
-                if (instance === __wbg_instance_id) wasm.{}(ptr >>> 0, 1);
+                if (instance === __wbg_instance_id) wasm.{}(ptr, 1);
             }}",
                 wasm_bindgen_shared::free_function(qualified)
             )
         } else {
             format!(
-                "ptr => wasm.{}(ptr >>> 0, 1)",
+                "ptr => wasm.{}(ptr, 1)",
                 wasm_bindgen_shared::free_function(qualified)
             )
         };
@@ -1741,13 +1761,13 @@ if (require('worker_threads').isMainThread) {{
                 self.typescript_emscripten_classes.push('\n');
 
                 self.typescript
-                    .push_str(&format!("{js_name}: typeof {js_name};\n"));
+                    .push_str(&format!("{js_name}: typeof {identifier};\n"));
 
                 String::new()
             } else {
                 // For hidden classes, add export type statement
                 if class.private {
-                    ts_dst.push_str(&format!("export type {{ {js_name} }};\n"));
+                    ts_dst.push_str(&format!("export type {{ {identifier} }};\n"));
                 }
                 ts_dst
             }
@@ -1770,7 +1790,7 @@ if (require('worker_threads').isMainThread) {{
             js_name,
             class.js_namespace.as_deref().unwrap_or_default(),
             ExportEntry::Definition(ExportDefinition {
-                identifier: class.identifier,
+                identifier: class.identifier.clone(),
                 comments: Some(class.comments),
                 definition: dst,
                 ts_definition,
@@ -2168,18 +2188,19 @@ if (require('worker_threads').isMainThread) {{
         // This might be not very intuitive, but such calls are usually more
         // expensive in mainstream engines than staying in the JS, and
         // charCodeAt on ASCII strings is usually optimised to raw bytes.
+        let ptr_coerce = self.coerce_ptr_suffix();
         let encode_as_ascii = format!(
             "\
                 if (realloc === undefined) {{
                     const buf = cachedTextEncoder.encode(arg);
-                    const ptr = malloc(buf.length, 1) >>> 0;
+                    const ptr = malloc(buf.length, 1){ptr_coerce};
                     {mem_formatted}.subarray(ptr, ptr + buf.length).set(buf);
                     WASM_VECTOR_LEN = buf.length;
                     return ptr;
                 }}
 
                 let len = arg.length;
-                let ptr = malloc(len, 1) >>> 0;
+                let ptr = malloc(len, 1){ptr_coerce};
 
                 const mem = {mem_formatted};
 
@@ -2200,12 +2221,12 @@ if (require('worker_threads').isMainThread) {{
                         if (offset !== 0) {{
                             arg = arg.slice(offset);
                         }}
-                        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+                        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1){ptr_coerce};
                         const view = {mem_formatted}.subarray(ptr + offset, ptr + len);
                         const ret = cachedTextEncoder.encodeInto(arg, view);
                         {debug_end}
                         offset += ret.written;
-                        ptr = realloc(ptr, len, offset, 1) >>> 0;
+                        ptr = realloc(ptr, len, offset, 1){ptr_coerce};
                     }}
 
                     WASM_VECTOR_LEN = offset;
@@ -2270,6 +2291,7 @@ if (require('worker_threads').isMainThread) {{
         };
         self.expose_wasm_vector_len();
         let mem_formatted: String = mem.access(self.config.mode.emscripten());
+        let ptr_coerce = self.coerce_ptr_suffix();
         match (self.aux.externref_table, self.aux.externref_alloc) {
             (Some(table), Some(alloc)) => {
                 // TODO: using `addToExternrefTable` goes back and forth between wasm
@@ -2284,7 +2306,7 @@ if (require('worker_threads').isMainThread) {{
                     format!(
                         "
                         function {ret}(array, malloc) {{
-                            const ptr = malloc(array.length * 4, 4) >>> 0;
+                            const ptr = malloc(array.length * 4, 4){ptr_coerce};
                             for (let i = 0; i < array.length; i++) {{
                                 const add = {add}(array[i]);
                                 {mem_formatted}.setUint32(ptr + 4 * i, add, true);
@@ -2303,7 +2325,7 @@ if (require('worker_threads').isMainThread) {{
                     format!(
                         "
                         function {ret}(array, malloc) {{
-                            const ptr = malloc(array.length * 4, 4) >>> 0;
+                            const ptr = malloc(array.length * 4, 4){ptr_coerce};
                             const mem = {mem_formatted};
                             for (let i = 0; i < array.length; i++) {{
                                 mem.setUint32(ptr + 4 * i, addHeapObject(array[i]), true);
@@ -2326,11 +2348,12 @@ if (require('worker_threads').isMainThread) {{
             num: view.num,
         };
         self.expose_wasm_vector_len();
+        let ptr_coerce = self.coerce_ptr_suffix();
         self.intrinsic(ret.to_string().into(), None, {
             format!(
                 "
                 function {ret}(arg, malloc) {{
-                    const ptr = malloc(arg.length * {size}, {size}) >>> 0;
+                    const ptr = malloc(arg.length * {size}, {size}){ptr_coerce};
                     {view}().set(arg, ptr / {size});
                     WASM_VECTOR_LEN = arg.length;
                     return ptr;
@@ -2541,12 +2564,12 @@ if (require('worker_threads').isMainThread) {{
             name: "getStringFromWasm".into(),
             num: mem.num,
         };
+        let ptr_coerce = self.coerce_ptr_suffix();
         self.intrinsic(ret.to_string().into(), None, {
             format!(
                 "
                 function {ret}(ptr, len) {{
-                    ptr = ptr >>> 0;
-                    return decodeText(ptr, len);
+                    return decodeText(ptr{ptr_coerce}, len);
                 }}
                 ",
             )
@@ -2606,11 +2629,12 @@ if (require('worker_threads').isMainThread) {{
             (Some(table), Some(drop)) => {
                 let table = self.export_name_of(table);
                 let drop = self.export_name_of(drop);
+                let ptr_fixup = self.coerce_ptr_assign("ptr");
                 self.intrinsic(ret.to_string().into(), None, {
                     format!(
                         "
                         function {ret}(ptr, len) {{
-                            ptr = ptr >>> 0;
+                            {ptr_fixup}
                             const mem = {mem}();
                             const result = [];
                             for (let i = ptr; i < ptr + 4 * len; i += 4) {{
@@ -2626,11 +2650,12 @@ if (require('worker_threads').isMainThread) {{
             }
             _ => {
                 self.expose_take_object();
+                let ptr_fixup = self.coerce_ptr_assign("ptr");
                 self.intrinsic(ret.to_string().into(), None, {
                     format!(
                         "
                         function {ret}(ptr, len) {{
-                            ptr = ptr >>> 0;
+                            {ptr_fixup}
                             const mem = {mem}();
                             const result = [];
                             for (let i = ptr; i < ptr + 4 * len; i += 4) {{
@@ -2658,11 +2683,12 @@ if (require('worker_threads').isMainThread) {{
         match self.aux.externref_table {
             Some(table) => {
                 let table = self.export_name_of(table);
+                let ptr_fixup = self.coerce_ptr_assign("ptr");
                 self.intrinsic(ret.to_string().into(), None, {
                     format!(
                         "
                         function {ret}(ptr, len) {{
-                            ptr = ptr >>> 0;
+                            {ptr_fixup}
                             const mem = {mem}();
                             const result = [];
                             for (let i = ptr; i < ptr + 4 * len; i += 4) {{
@@ -2677,11 +2703,12 @@ if (require('worker_threads').isMainThread) {{
             }
             _ => {
                 self.expose_get_object();
+                let ptr_fixup = self.coerce_ptr_assign("ptr");
                 self.intrinsic(ret.to_string().into(), None, {
                     format!(
                         "
                         function {ret}(ptr, len) {{
-                            ptr = ptr >>> 0;
+                            {ptr_fixup}
                             const mem = {mem}();
                             const result = [];
                             for (let i = ptr; i < ptr + 4 * len; i += 4) {{
@@ -2759,11 +2786,12 @@ if (require('worker_threads').isMainThread) {{
             num: view.num,
         };
         let heap_view = view.access(self.config.mode.emscripten());
+        let ptr_fixup = self.coerce_ptr_assign("ptr");
         self.intrinsic(name.into(), Some(&ret.to_string()), {
             format!(
                 "
                 function {ret}(ptr, len) {{
-                    ptr = ptr >>> 0;
+                    {ptr_fixup}
                     return {heap_view}.subarray(ptr / {size}, ptr / {size} + len);
                 }}
                 ",
@@ -3469,7 +3497,7 @@ if (require('worker_threads').isMainThread) {{
         };
         reset_statements.push(format!(
             "{abort_reset}
-            const wasmInstance = new WebAssembly.Instance(wasmModule, __wbg_get_imports());
+            wasmInstance = new WebAssembly.Instance(wasmModule, __wbg_get_imports());
             wasm = wasmInstance.exports;
             wasm.__wbindgen_start();
             "
@@ -3721,24 +3749,35 @@ if (require('worker_threads').isMainThread) {{
     pub fn generate(&mut self) -> Result<(), Error> {
         self.prestore_global_import_identifiers()?;
 
-        // Set up qualified_name → rust_name and qualified_name → js_name mappings
-        // before processing adapters, so that WasmDescribe lookups (which use
-        // qualified_name) can resolve to the correct exported class.
+        // Set up qualified-name mappings before processing adapters, so that
+        // WasmDescribe lookups can resolve to the right exported class and TS
+        // declaration identifier.
         for s in self.aux.structs.iter() {
             self.qualified_to_rust_name
                 .insert(s.qualified_name.clone(), s.rust_name.clone());
-            self.qualified_to_js_name
-                .insert(s.qualified_name.clone(), s.name.clone());
-            if s.name != s.rust_name {
-                self.qualified_to_rust_name
-                    .insert(s.name.clone(), s.rust_name.clone());
-            }
-            // Pre-populate js_name so require_class can generate the correct
-            // identifier before generate_struct runs.
-            self.exported_classes
+            let needs_identifier = self
+                .exported_classes
+                .get(&s.rust_name)
+                .is_none_or(|class| class.identifier.is_empty());
+            let identifier = if needs_identifier {
+                Some(self.generate_identifier(&s.qualified_name))
+            } else {
+                None
+            };
+            let class = self
+                .exported_classes
                 .entry(s.rust_name.clone())
-                .or_default()
-                .js_name = Some(s.name.clone());
+                .or_default();
+            class.js_name = Some(s.name.clone());
+            class.qualified_name = Some(s.qualified_name.clone());
+            if let Some(identifier) = identifier {
+                class.identifier = identifier;
+            }
+            self.qualified_to_identifier
+                .insert(s.qualified_name.clone(), class.identifier.clone());
+        }
+        for e in self.aux.enums.values() {
+            self.get_or_create_identifier(&e.qualified_name);
         }
 
         self.generate_jstag_import();
@@ -3864,10 +3903,10 @@ if (require('worker_threads').isMainThread) {{
                 r#"
 addToLibrary({
     __wbindgen_wrapped_jstag: "(globalThis.__wbindgen_wrapped_jstag = new WebAssembly.Tag({ parameters: ['externref'] }))",
-    
+
     __wbindgen_wrapped_jstag__postset: `
         function __wbg_call_guard() {}
-        
+
         function __wbg_handle_catch(e) {
             if (e instanceof WebAssembly.Exception && e.is(globalThis.__wbindgen_wrapped_jstag)) {
                 throw e.getArg(globalThis.__wbindgen_wrapped_jstag, 0);
@@ -3895,7 +3934,7 @@ addToLibrary({
             let __wbg_called_abort = false;
             function __wbg_call_abort_hook() {{
                 __wbg_called_abort = true;
-                try {{ 
+                try {{
                     const idx = {mem_view}()[wasm.__abort_handler.value / 4];
                     if (idx) wasm.{table}.get(idx)();
                 }} catch(_) {{}}
@@ -4122,8 +4161,11 @@ addToLibrary({
 
                 match &export.kind {
                     AuxExportKind::Function(name) | AuxExportKind::FunctionThis(name) => {
-                        let identifier = self.generate_identifier(name);
-
+                        let qualified_name = wasm_bindgen_shared::qualified_name(
+                            export.js_namespace.as_deref(),
+                            name,
+                        );
+                        let identifier = self.get_or_create_identifier(&qualified_name);
                         let (ts_definition, ts_comments) = if let Some(ts_sig) = ts_sig {
                             if matches!(self.config.mode, OutputMode::Emscripten) {
                                 // Emscripten: Write "name(args): ret;" directly to buffer
@@ -4151,7 +4193,7 @@ addToLibrary({
                             name,
                             export.js_namespace.as_deref().unwrap_or_default(),
                             ExportEntry::Definition(ExportDefinition {
-                                identifier,
+                                identifier: identifier.clone(),
                                 comments: Some(js_docs),
                                 definition,
                                 ts_definition,
@@ -5049,11 +5091,32 @@ addToLibrary({
                 assert_eq!(args.len(), 0);
 
                 match self.config.mode {
-                    OutputMode::Web | OutputMode::NoModules { .. } |
-                    OutputMode::Node { .. } | OutputMode::Module => "wasmModule",
+                    OutputMode::Web
+                    | OutputMode::NoModules { .. }
+                    | OutputMode::Node { .. }
+                    | OutputMode::Module => "wasmModule",
                     _ => bail!(
                         "`wasm_bindgen::module` is currently only supported with \
-                         `--target no-modules`, `--target web`, `--target module` and `--target nodejs`"
+                         `--target no-modules`, `--target web`, `--target module`, \
+                         `--target nodejs` and `--target experimental-nodejs-module`"
+                    ),
+                }
+                .to_string()
+            }
+
+            Intrinsic::Instance => {
+                assert_eq!(args.len(), 0);
+                match self.config.mode {
+                    OutputMode::Web
+                    | OutputMode::NoModules { .. }
+                    | OutputMode::Node { .. }
+                    | OutputMode::Module
+                    | OutputMode::Deno => "wasmInstance",
+                    _ => bail!(
+                        "`wasm_bindgen::instance` is currently only supported with \
+                         `--target no-modules`, `--target web`, `--target deno`, \
+                         `--target module`, `--target nodejs` and \
+                         `--target experimental-nodejs-module`"
                     ),
                 }
                 .to_string()
@@ -5173,8 +5236,7 @@ addToLibrary({
     }
 
     fn generate_enum(&mut self, enum_: &AuxEnum) -> Result<(), Error> {
-        let identifier = self.generate_identifier(&enum_.name);
-
+        let identifier = self.get_or_create_identifier(&enum_.qualified_name);
         let ts_comments = format_doc_comments(&enum_.comments, None);
         let mut typescript = String::new();
         if enum_.generate_typescript {
@@ -5225,7 +5287,7 @@ addToLibrary({
             &enum_.name,
             enum_.js_namespace.as_deref().unwrap_or_default(),
             ExportEntry::Definition(ExportDefinition {
-                identifier,
+                identifier: identifier.clone(),
                 comments: Some(docs),
                 definition,
                 ts_definition: typescript,
@@ -5475,11 +5537,24 @@ addToLibrary({
     }
 
     fn generate_identifier(&mut self, name: &str) -> String {
+        Self::generate_identifier_with(&mut self.defined_identifiers, name)
+    }
+
+    /// Returns the identifier for a qualified name, reusing a previously
+    /// registered one or generating (and storing) a new one.
+    fn get_or_create_identifier(&mut self, qualified_name: &str) -> String {
+        if let Some(id) = self.qualified_to_identifier.get(qualified_name) {
+            return id.clone();
+        }
+        let id = self.generate_identifier(qualified_name);
+        self.qualified_to_identifier
+            .insert(qualified_name.to_string(), id.clone());
+        id
+    }
+
+    fn generate_identifier_with(identifiers: &mut HashMap<String, usize>, name: &str) -> String {
         let name = to_valid_ident(name);
-        let cnt = self
-            .defined_identifiers
-            .entry(name.to_string())
-            .or_insert(0);
+        let cnt = identifiers.entry(name.to_string()).or_insert(0);
         *cnt += 1;
         let mut suffix = *cnt;
         if suffix == 1 {
@@ -5487,13 +5562,13 @@ addToLibrary({
         } else {
             // Keep incrementing until we find an identifier that isn't already taken
             let mut candidate = format!("{name}{suffix}");
-            while self.defined_identifiers.contains_key(&candidate) {
+            while identifiers.contains_key(&candidate) {
                 suffix += 1;
                 candidate = format!("{name}{suffix}");
             }
             // Update the counter and reserve the candidate
-            *self.defined_identifiers.get_mut(&*name).unwrap() = suffix;
-            self.defined_identifiers.insert(candidate.clone(), 1);
+            *identifiers.get_mut(&*name).unwrap() = suffix;
+            identifiers.insert(candidate.clone(), 1);
             candidate
         }
     }
@@ -5513,20 +5588,39 @@ addToLibrary({
 
         use walrus::ir::*;
 
+        // Shim ABI matches `WasmWord`: `f64` on memory64, `i32` on wasm32.
+        // The `__stack_pointer` global is still `i64` on memory64, so we
+        // convert at the boundary.
+        let val_type = if self.memory64 {
+            ValType::F64
+        } else {
+            ValType::I32
+        };
+
         let mut builder =
-            walrus::FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[ValType::I32]);
+            walrus::FunctionBuilder::new(&mut self.module.types, &[val_type], &[val_type]);
         builder.name("__wbindgen_add_to_stack_pointer".to_string());
 
         let mut body = builder.func_body();
-        let arg = self.module.locals.add(ValType::I32);
+        let arg = self.module.locals.add(val_type);
 
         // Create a shim function that mutate the stack pointer
         // to avoid exporting a mutable global.
-        body.local_get(arg)
-            .global_get(stack_pointer)
-            .binop(BinaryOp::I32Add)
-            .global_set(stack_pointer)
-            .global_get(stack_pointer);
+        if self.memory64 {
+            body.local_get(arg)
+                .unop(UnaryOp::I64TruncSSatF64)
+                .global_get(stack_pointer)
+                .binop(BinaryOp::I64Add)
+                .global_set(stack_pointer)
+                .global_get(stack_pointer)
+                .unop(UnaryOp::F64ConvertSI64);
+        } else {
+            body.local_get(arg)
+                .global_get(stack_pointer)
+                .binop(BinaryOp::I32Add)
+                .global_set(stack_pointer)
+                .global_get(stack_pointer);
+        }
 
         let add_to_stack_pointer_func = builder.finish(vec![arg], &mut self.module.funcs);
 

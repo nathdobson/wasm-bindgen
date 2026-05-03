@@ -15,6 +15,7 @@ use anyhow::{bail, Error};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use walrus::{Module, ValType};
+use wasm_bindgen_shared::identifier::is_valid_ident;
 
 /// A one-size-fits-all builder for processing WebIDL bindings and generating
 /// JS.
@@ -136,6 +137,10 @@ pub fn maybe_wrap_export_call(call: &str, guard: ExportGuard) -> String {
         ExportGuard::None => format!("{call};"),
     }
 }
+
+/// Sentinel used by the f64-ABI `Option` paths to represent `None`. Must not
+/// collide with any valid payload (including i64/u64 on wasm64 via f64).
+const F64_OPTION_SENTINEL: &str = "Number.MAX_SAFE_INTEGER";
 
 impl<'a, 'b> Builder<'a, 'b> {
     pub fn new(cx: &'a mut Context<'b>) -> Builder<'a, 'b> {
@@ -431,7 +436,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                             TypePosition::Argument,
                             &mut ts,
                             Some(&mut ts_refs),
-                            &self.cx.qualified_to_js_name,
+                            &self.cx.qualified_to_identifier,
                         );
                         ts.push_str(" | null");
                     }
@@ -441,7 +446,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                             TypePosition::Argument,
                             &mut ts,
                             Some(&mut ts_refs),
-                            &self.cx.qualified_to_js_name,
+                            &self.cx.qualified_to_identifier,
                         );
                         omittable = false;
                         arg.push_str(": ");
@@ -489,7 +494,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         TypePosition::Return,
                         &mut ret,
                         Some(&mut ts_refs),
-                        &self.cx.qualified_to_js_name,
+                        &self.cx.qualified_to_identifier,
                     ),
                     _ => ret.push_str("[any]"),
                 }
@@ -554,7 +559,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                             TypePosition::Argument,
                             &mut arg,
                             None,
-                            &self.cx.qualified_to_js_name,
+                            &self.cx.qualified_to_identifier,
                         );
                         arg.push_str(" | null} ");
                         arg.push('[');
@@ -568,7 +573,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                             TypePosition::Argument,
                             &mut arg,
                             None,
-                            &self.cx.qualified_to_js_name,
+                            &self.cx.qualified_to_identifier,
                         );
                         arg.push_str("} ");
                         arg.push_str(name);
@@ -605,7 +610,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     TypePosition::Argument,
                     &mut ret,
                     None,
-                    &self.cx.qualified_to_js_name,
+                    &self.cx.qualified_to_identifier,
                 );
             }
             ret.push_str("} ");
@@ -1089,12 +1094,18 @@ fn instruction(
                 other => bail!("invalid aggregate return type {other:?}"),
             };
             // Note that we always assume the return pointer is argument 0,
-            // which is currently the case for LLVM.
+            // which is currently the case for LLVM. On wasm64 the retptr is
+            // an LLVM-synthesized `i64` sret, arriving in JS as a BigInt, so
+            // coerce it to a number before doing pointer arithmetic.
             let val = js.pop();
             let mem_string = mem.access(js.cx.config.mode.emscripten());
             let expr = format!(
-                "{mem_string}.{method}({} + {size} * {offset}, {val}, true);",
-                js.arg(0),
+                "{mem_string}.{method}({retptr} + {size} * {offset}, {val}, true);",
+                retptr = if js.cx.memory64 {
+                    format!("Number({})", js.arg(0))
+                } else {
+                    js.arg(0).to_string()
+                },
             );
             js.prelude(&expr);
         }
@@ -1253,7 +1264,19 @@ fn instruction(
             // u32.
 
             let op = if *signed { ">>" } else { ">>>" };
-            js.push(format!("isLikeNone({val}) ? 0x100000001 : ({val}) {op} 0"));
+            js.push(format!(
+                "isLikeNone({val}) ? {F64_OPTION_SENTINEL} : ({val}) {op} 0"
+            ));
+        }
+        Instruction::F64FromOptionSentinelNumber => {
+            // Used when the underlying integer spans the full f64-safe range
+            // (e.g. i64/u64 on wasm64). No narrowing; just coerce to number.
+            let val = js.pop();
+            js.cx.expose_is_like_none();
+            js.assert_optional_number(&val);
+            js.push(format!(
+                "isLikeNone({val}) ? {F64_OPTION_SENTINEL} : Number({val})"
+            ));
         }
         Instruction::F64FromOptionSentinelF32 => {
             let val = js.pop();
@@ -1266,7 +1289,7 @@ fn instruction(
             // possible to use a sentinel value.
 
             js.push(format!(
-                "isLikeNone({val}) ? 0x100000001 : Math.fround({val})"
+                "isLikeNone({val}) ? {F64_OPTION_SENTINEL} : Math.fround({val})"
             ));
         }
 
@@ -1449,15 +1472,15 @@ fn instruction(
                         (
                             format!(
                                 "\
-                                this.__wbg_ptr = {val} >>> 0;
+                                this.__wbg_ptr = {val};
                                 Object.defineProperty(this, '__wbg_inst', {{ value: __wbg_instance_id, writable: true }});
                                 "
                             ),
-                            format!("{{ ptr: {val} >>> 0, instance: __wbg_instance_id }}"),
+                            format!("{{ ptr: {val}, instance: __wbg_instance_id }}"),
                         )
                     } else {
                         (
-                            format!("this.__wbg_ptr = {val} >>> 0;"),
+                            format!("this.__wbg_ptr = {val};"),
                             "this.__wbg_ptr".to_string(),
                         )
                     };
@@ -1576,7 +1599,7 @@ fn instruction(
                 match dtor {
                     ClosureDtor::OwnClosure => unreachable!(),
                     ClosureDtor::Immediate => {
-                        // Wrapper for ImmediateClosure or raw &dyn FnMut/&dyn Fn closure
+                        // Wrapper for &dyn FnMut/&dyn Fn closure
                         // used as an argument to a JS function. Make sure to null out our
                         // internal pointers when we return back to Rust to
                         // ensure that any lingering references to the closure
@@ -1654,7 +1677,9 @@ fn instruction(
 
         Instruction::OptionF64Sentinel => {
             let val = js.pop();
-            js.push(format!("{val} === 0x100000001 ? undefined : {val}"));
+            js.push(format!(
+                "{val} === {F64_OPTION_SENTINEL} ? undefined : {val}"
+            ));
         }
 
         Instruction::OptionU32Sentinel => {
@@ -1711,7 +1736,7 @@ fn instruction(
 
         Instruction::OptionNonNullFromI32 => {
             let val = js.pop();
-            js.push(format!("{val} === 0 ? undefined : {val} >>> 0"));
+            js.push(format!("{val} === 0 ? undefined : {val}"));
         }
     }
     Ok(())
@@ -1843,7 +1868,17 @@ fn adapter2ts(
         AdapterType::String => dst.push_str("string"),
         AdapterType::Externref => dst.push_str("any"),
         AdapterType::Bool => dst.push_str("boolean"),
-        AdapterType::Vector(kind) => dst.push_str(&kind.js_ty()),
+        AdapterType::Vector(kind) => match kind {
+            VectorKind::NamedExternref(name) => {
+                let resolved = name_map.get(name).map(|s| s.as_str()).unwrap_or(name);
+                if is_valid_ident(resolved) {
+                    dst.push_str(&format!("{resolved}[]"));
+                } else {
+                    dst.push_str(&format!("({resolved})[]"));
+                }
+            }
+            _ => dst.push_str(&kind.js_ty()),
+        },
         AdapterType::Option(ty) => {
             adapter2ts(ty, position, dst, refs, name_map);
             dst.push_str(match position {
@@ -1852,11 +1887,10 @@ fn adapter2ts(
             });
         }
         AdapterType::NamedExternref(name) => dst.push_str(name),
-        AdapterType::Struct(name) => {
+        AdapterType::Struct(name) | AdapterType::Enum(name) => {
             let resolved = name_map.get(name).map(|s| s.as_str()).unwrap_or(name);
             dst.push_str(resolved);
         }
-        AdapterType::Enum(name) => dst.push_str(name),
         AdapterType::StringEnum(name) => {
             if let Some(refs) = refs {
                 refs.insert(TsReference::StringEnum(name.clone()));
