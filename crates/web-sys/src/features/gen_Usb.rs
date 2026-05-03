@@ -74,7 +74,7 @@ extern "C" {
     pub fn get_devices(this: &Usb) -> ::js_sys::Promise<::js_sys::Array<UsbDevice>>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "UsbDevice", feature = "UsbDeviceRequestOptions",))]
-    # [wasm_bindgen (method , structural , js_class = "USB" , js_name = requestDevice, catch)]
+    # [wasm_bindgen (method , structural , js_class = "USB" , js_name = requestDevice)]
     #[doc = "The `requestDevice()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/USB/requestDevice)"]
@@ -86,5 +86,5 @@ extern "C" {
     pub fn request_device(
         this: &Usb,
         options: &UsbDeviceRequestOptions,
-    ) -> Result<::js_sys::Promise<UsbDevice>, JsValue>;
+    ) -> ::js_sys::Promise<UsbDevice>;
 }
